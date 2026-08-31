@@ -1683,11 +1683,14 @@ def _worksheet_formula_fingerprint(
             formula = _first_child_by_local(cell, "f")
             if formula is None:
                 continue
+            cached_value = _first_child_by_local(cell, "v")
             formulas.append(
                 (
-                    _stable_attrs(cell, ("r",)),
+                    _stable_attrs(cell, ("r", "t")),
                     _stable_attrs(formula, ("t", "ref", "si", "ca", "bx")),
                     _text(formula),
+                    cached_value is not None,
+                    _text(cached_value) if cached_value is not None else None,
                 )
             )
         if formulas:
