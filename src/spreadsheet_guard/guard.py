@@ -87,7 +87,11 @@ def guard_workbooks(
     if result.get("contract_version") != EXPECTED_GUARD_CONTRACT_VERSION:
         raise GuardExecutionError("WolfXL Guard result contract version drifted")
     status = result.get("status")
-    if status not in {"passed", "failed", "unassessed"}:
+    if not isinstance(status, str) or status not in {
+        "passed",
+        "failed",
+        "unassessed",
+    }:
         raise GuardExecutionError(f"WolfXL Guard returned invalid status {status!r}")
     report = result.get("report")
     if not isinstance(report, Mapping) or report.get("status") != status:

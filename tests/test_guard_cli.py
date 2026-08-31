@@ -79,7 +79,9 @@ def test_loader_fails_closed_on_contract_drift(
         guard_module._load_wolfxl_guard()
 
 
+@pytest.mark.parametrize("invalid_status", ["unknown", [], {}])
 def test_guard_workbooks_fails_closed_on_invalid_contract_result(
+    invalid_status: object,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -91,7 +93,7 @@ def test_guard_workbooks_fails_closed_on_invalid_contract_result(
         "_load_wolfxl_guard",
         lambda: lambda **kwargs: {
             "contract_version": "wolfxl-guard-contract-v1",
-            "status": "unknown",
+            "status": invalid_status,
             "output_path": str(output),
             "report": {},
         },
