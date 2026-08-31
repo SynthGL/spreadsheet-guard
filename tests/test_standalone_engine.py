@@ -95,11 +95,26 @@ def test_bundled_engine_rejects_a_cached_formula_result_change(
     }
 
 
-def test_bundled_engine_rejects_a_non_anchor_array_cached_result_change(
+@pytest.mark.parametrize(
+    ("case_name", "anchor_formula"),
+    [
+        (
+            "array",
+            b'<f t="array" ref="A3:A4">SUM(A1:A2)</f>',
+        ),
+        (
+            "data-table",
+            b'<f t="dataTable" ref="A3:A4"/>',
+        ),
+    ],
+)
+def test_bundled_engine_rejects_a_non_anchor_range_formula_cache_change(
     tmp_path: Path,
+    case_name: str,
+    anchor_formula: bytes,
 ) -> None:
-    before = tmp_path / "array-before.xlsx"
-    after = tmp_path / "array-after.xlsx"
+    before = tmp_path / f"{case_name}-before.xlsx"
+    after = tmp_path / f"{case_name}-after.xlsx"
     _replace_archive_member(
         PROOF_DIR / "before.xlsx",
         before,
@@ -109,8 +124,9 @@ def test_bundled_engine_rejects_a_non_anchor_array_cached_result_change(
             b'<row r="4" spans="1:1"><c r="A4"><f>A3*2</f><v>0</v></c>'
         ),
         (
-            b'<c r="A3"><f t="array" ref="A3:A4">SUM(A1:A2)</f><v>30</v></c>'
-            b'</row><row r="4" spans="1:1"><c><v>60</v></c>'
+            b'<c r="A3">'
+            + anchor_formula
+            + b'<v>30</v></c></row><row r="4" spans="1:1"><c><v>60</v></c>'
         ),
     )
     _replace_archive_member(
@@ -124,7 +140,7 @@ def test_bundled_engine_rejects_a_non_anchor_array_cached_result_change(
     outcome = guard_workbooks(
         before,
         after,
-        tmp_path / "array-cached-result-report.json",
+        tmp_path / f"{case_name}-cached-result-report.json",
     )
 
     assert outcome.status == "failed"

@@ -1743,7 +1743,7 @@ def _worksheet_formula_cells(
     return cells
 
 
-def _array_result_coordinates(
+def _range_formula_result_coordinates(
     cells: list[
         tuple[
             ElementTree.Element,
@@ -1751,10 +1751,10 @@ def _array_result_coordinates(
             tuple[int, int],
         ]
     ],
-    array_ranges: list[tuple[int, int, int, int]],
+    ranges: list[tuple[int, int, int, int]],
 ) -> set[tuple[int, int]]:
     events: dict[int, list[tuple[int, int]]] = {}
-    for first_column, first_row, last_column, last_row in array_ranges:
+    for first_column, first_row, last_column, last_row in ranges:
         events.setdefault(first_row, []).extend(
             ((first_column, 1), (last_column + 1, -1))
         )
@@ -1781,7 +1781,7 @@ def _array_result_coordinates(
             column -= column & -column
         return value
 
-    array_results: set[tuple[int, int]] = set()
+    results: set[tuple[int, int]] = set()
     for _, formula, coordinate in sorted(
         cells,
         key=lambda item: (item[2][1], item[2][0]),
@@ -1792,8 +1792,8 @@ def _array_result_coordinates(
                 update(event_column, delta)
             event_index += 1
         if formula is None and coverage(column) > 0:
-            array_results.add(coordinate)
-    return array_results
+            results.add(coordinate)
+    return results
 
 
 def _cached_formula_value_fingerprint(
@@ -1838,21 +1838,21 @@ def _worksheet_formula_fingerprint(
         if root is None:
             continue
         cells = _worksheet_formula_cells(root)
-        array_ranges = [
+        range_formula_ranges = [
             bounds
             for _, formula, _ in cells
             if formula is not None
-            and _attr(formula, "t") == "array"
+            and _attr(formula, "t") in {"array", "dataTable"}
             and (bounds := _cell_range_bounds(_attr(formula, "ref"))) is not None
         ]
-        array_results = _array_result_coordinates(cells, array_ranges)
+        range_results = _range_formula_result_coordinates(cells, range_formula_ranges)
 
         formulas: list[object] = []
         for cell, formula, coordinate in cells:
-            if formula is None and coordinate not in array_results:
+            if formula is None and coordinate not in range_results:
                 continue
             fingerprint: dict[str, object] = {
-                "kind": "formula" if formula is not None else "array_result",
+                "kind": "formula" if formula is not None else "range_result",
                 "cell": coordinate,
                 "cached_value": _cached_formula_value_fingerprint(cell),
             }
