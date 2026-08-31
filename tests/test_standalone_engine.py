@@ -5,6 +5,8 @@ import json
 import zipfile
 from pathlib import Path
 
+import pytest
+
 from spreadsheet_guard import guard_workbooks
 
 PROOF_DIR = Path(__file__).parents[1] / "examples" / "formula-integrity"
@@ -91,3 +93,38 @@ def test_bundled_engine_rejects_a_cached_formula_result_change(
     assert {finding["kind"] for finding in package_decision["findings"]} == {
         "worksheet_formulas_semantic_drift"
     }
+
+
+@pytest.mark.parametrize(
+    ("formula_text", "fingerprint_name"),
+    [
+        (b"SUM(Table1[Amount])", "structured_references"),
+        (b"'[Other.xlsx]Sheet1'!A1", "external_links"),
+    ],
+)
+def test_expanded_formula_fingerprint_remains_visible_to_consumers(
+    tmp_path: Path,
+    formula_text: bytes,
+    fingerprint_name: str,
+) -> None:
+    before = tmp_path / f"{fingerprint_name}-before.xlsx"
+    after = tmp_path / f"{fingerprint_name}-after.xlsx"
+    for destination in (before, after):
+        _replace_archive_member(
+            PROOF_DIR / "before.xlsx",
+            destination,
+            "xl/worksheets/sheet1.xml",
+            b"SUM(A1:A2)",
+            formula_text,
+        )
+
+    outcome = guard_workbooks(
+        before,
+        after,
+        tmp_path / f"{fingerprint_name}-report.json",
+    )
+
+    assert outcome.status == "passed"
+    for side in ("before", "after"):
+        counts = outcome.report["fidelity_audit"][side]["semantic_fingerprint_counts"]
+        assert counts[fingerprint_name] > 0

@@ -1749,7 +1749,7 @@ def _structured_reference_fingerprint(
             formula
             for formula in formulas
             if isinstance(formula, tuple)
-            and len(formula) == 3
+            and len(formula) >= 3
             and isinstance(formula[2], str)
             and _is_structured_reference_formula(formula[2])
         ]
@@ -2051,7 +2051,7 @@ def _worksheet_formula_texts(
         for formula in formulas:
             if not (
                 isinstance(formula, tuple)
-                and len(formula) == 3
+                and len(formula) >= 3
                 and isinstance(formula[2], str)
             ):
                 continue
