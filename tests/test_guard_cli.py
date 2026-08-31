@@ -11,7 +11,9 @@ import spreadsheet_guard.guard as guard_module
 from spreadsheet_guard.guard import GuardExecutionError, GuardOutcome, guard_workbooks
 
 
-def test_guard_workbooks_delegates_read_only_comparison(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_guard_workbooks_delegates_read_only_comparison(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     before = tmp_path / "before.xlsx"
     after = tmp_path / "after.xlsx"
     output = tmp_path / "guard.json"
@@ -25,7 +27,7 @@ def test_guard_workbooks_delegates_read_only_comparison(tmp_path: Path, monkeypa
         kwargs["output"].write_text(json.dumps(report))
         return report
 
-    monkeypatch.setattr(guard_module, "_load_wolfxl_guard", lambda: fake_guard)
+    monkeypatch.setattr(guard_module, "_run_guard", fake_guard)
 
     outcome = guard_workbooks(before, after, output)
 
@@ -46,13 +48,15 @@ def test_guard_workbooks_fails_closed_on_invalid_report(
         kwargs["output"].write_text("{}")
         return {"status": "unknown"}
 
-    monkeypatch.setattr(guard_module, "_load_wolfxl_guard", lambda: fake_guard)
+    monkeypatch.setattr(guard_module, "_run_guard", fake_guard)
 
     with pytest.raises(GuardExecutionError, match="invalid status"):
         guard_workbooks(tmp_path / "before.xlsx", tmp_path / "after.xlsx", output)
 
 
-@pytest.mark.parametrize(("status", "expected_code"), [("passed", 0), ("failed", 1), ("unassessed", 1)])
+@pytest.mark.parametrize(
+    ("status", "expected_code"), [("passed", 0), ("failed", 1), ("unassessed", 1)]
+)
 def test_guard_cli_exit_code_tracks_guard_status(
     status: str,
     expected_code: int,
@@ -73,12 +77,19 @@ def test_guard_cli_exit_code_tracks_guard_status(
         assert after == tmp_path / "after.xlsx"
         assert requested_output == output
         assert policy is None
-        return GuardOutcome(status=status, output_path=output, report={"status": status})
+        return GuardOutcome(
+            status=status, output_path=output, report={"status": status}
+        )
 
     monkeypatch.setattr(cli_module, "guard_workbooks", fake_guard_workbooks)
 
     code = cli_module.main(
-        [str(tmp_path / "before.xlsx"), str(tmp_path / "after.xlsx"), "--output", str(output)]
+        [
+            str(tmp_path / "before.xlsx"),
+            str(tmp_path / "after.xlsx"),
+            "--output",
+            str(output),
+        ]
     )
 
     assert code == expected_code
