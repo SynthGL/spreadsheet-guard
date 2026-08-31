@@ -1,92 +1,143 @@
 # spreadsheet-guard
 
-**A read-only audit for agentic spreadsheet edits that tells you whether a candidate workbook silently damaged your file.**
+**A standalone, read-only preservation gate for `.xlsx` and `.xlsm` files.**
 
-Compare the original workbook with the agent's candidate. The Guard checks preservation without modifying either input.
+Compare an original workbook with a candidate produced by an agent, script, or
+library. `spreadsheet-guard` audits OOXML structure, formulas, cached values, and
+feature relationships without modifying either input. It emits deterministic
+JSON and automation-friendly exit codes.
 
-- In a paired model study, direct openpyxl editing achieved **6/27** useful successes; a verified transaction achieved **26/27**. Exact McNemar p=1.91e-6.
-- In an Enron census of **500 real workbooks**, the standard openpyxl write stack package-preserved **0 of 496** written files and silently invalidated cached formula values in **62.5%** of them.
-
-**Falsifier: if your path is fine, the tool says so in one run.**
+- MIT licensed
+- No proprietary runtime or service dependency
+- Local files only
+- Fail-closed on invalid or incomplete evidence
 
 ## Install and audit
 
 Requires Python 3.11 or newer.
 
-```bash
+```text
 pip install spreadsheet-guard
 spreadsheet-guard before.xlsx after.xlsx --output preservation-report.json
 ```
 
-The command compares `before.xlsx` with `after.xlsx`, writes the complete
-preservation report to `preservation-report.json`, and writes this summary to
-stdout when it passes:
+The command writes the complete report to `preservation-report.json` and a
+one-line summary to stdout:
 
 ```json
 {"report": "preservation-report.json", "schema_version": 1, "status": "passed"}
 ```
 
-The package is MIT-licensed. Running the audit requires the WolfXL Commercial
-runtime's operations SDK. Without that runtime, the CLI fails closed with a JSON
-error and exit code 2. Request evaluation access at [wolfxl.com](https://wolfxl.com).
+| Status | Exit code | Meaning |
+|---|---:|---|
+| `passed` | 0 | Every configured preservation dimension passed. |
+| `failed` | 1 | At least one configured dimension found a regression. |
+| `unassessed` | 1 | Required evidence was unavailable or a dimension was disabled. |
+| `error` | 2 | Inputs, policy, or execution were invalid. |
 
-The optional `--policy policy.json` argument accepts a JSON object that scopes or
-tightens the Guard policy:
+## Run the checked-in proof
+
+From a clone of this repository, these commands target bash or zsh and use
+repo-relative paths:
 
 ```bash
-spreadsheet-guard before.xlsx after.xlsx --output preservation-report.json --policy policy.json
+uv sync
+
+uv run spreadsheet-guard \
+  examples/formula-integrity/before.xlsx \
+  examples/formula-integrity/after-intact.xlsx \
+  --output /tmp/spreadsheet-guard-passed.json
+
+uv run spreadsheet-guard \
+  examples/formula-integrity/before.xlsx \
+  examples/formula-integrity/after-formula-damaged.xlsx \
+  --output /tmp/spreadsheet-guard-failed.json
 ```
 
-`passed` exits 0. `failed` and `unassessed` exit 1. Invalid inputs, an unreadable
-policy, or an unavailable runtime exit 2. The complete report contains the
-per-finding diagnostics.
+The first command exits 0 with `passed`. The second exits 1 with `failed`
+because `SUM(A1:A2)` changed to `SUM(A1:A1)`. The frozen reports are checked in
+at:
+
+- [`examples/formula-integrity/passed-report.json`](examples/formula-integrity/passed-report.json)
+- [`examples/formula-integrity/failed-report.json`](examples/formula-integrity/failed-report.json)
+
+This compact proof demonstrates the packaged engine and report contract. It does
+not establish universal Excel compatibility or business-output correctness.
 
 ## What it checks
 
-The Guard is a preservation check, not a generic workbook diff:
+The default policy requires all five dimensions to remain unchanged:
 
-- **Package parts:** unauthorized changes to OOXML package content.
-- **Cached formula values:** values a reviewer may see before any recalculation.
-- **Workbook features:** survival of features such as charts, defined names,
-  external links, data validation, conditional formatting, custom XML, and
-  pivot-related metadata.
+1. Macro inventory
+2. External-link inventory
+3. Worksheet inventory and names
+4. Formula integrity
+5. OOXML package integrity
 
-## What it does not check
+Package integrity checks part relationships, XML parseability, cached formula
+values, and semantic fingerprints for workbook features such as charts, defined
+names, data validation, conditional formatting, drawings, external links, and
+pivot-related metadata.
 
-The Guard does **not** determine whether formulas, assumptions, or business
-logic are correct. A workbook can be structurally preserved and still contain
-the wrong numbers. Functional and business correctness are out of scope.
+The strict default also reports intentional formula or structural changes. The
+caller must compare each finding with the intended edit.
 
-## Evidence
+## Custom policy
 
-The evidence bundle ships with the companion `spreadsheet-harness` repository.
-Its configured GitHub remote is not publicly readable, so the source reports are
-listed as repo-relative paths:
+Pass `--policy policy.json` to replace the strict default:
 
-- `results/enron-census-v1/CENSUS-REPORT.md`: 500-workbook Enron mutation census,
-  corpus definition, results, and reproduction steps.
-- `results/bakeoff/write-path-matrix-v1/bakeoff-matrix.md`: write-path matrix for
-  package preservation and feature survival.
-- `results/customer-evidence/verified-runtime-v1/customer-story.md`: paired model
-  study, transaction safety case, and runtime evidence.
+```text
+spreadsheet-guard before.xlsx after.xlsx \
+  --output preservation-report.json \
+  --policy policy.json
+```
 
-The studies measure preservation under their stated corpus and task contracts.
-They do not establish business-output correctness or universal spreadsheet
-compatibility.
+```json
+{
+  "macro_inventory": {"mode": "unchanged"},
+  "external_link_inventory": {"mode": "unchanged"},
+  "worksheet_inventory": {
+    "mode": "unchanged",
+    "expected_names": ["Inputs", "Model", "Outputs"]
+  },
+  "formula_integrity": {"mode": "unchanged"},
+  "package_integrity": {"mode": "unchanged"}
+}
+```
 
-## Write with WolfXL
+A custom policy should enumerate all five dimensions when a `passed` result is
+required. A dimension set to `null` is reported as `unassessed`.
 
-[WolfXL](https://github.com/wolfiesch/wolfxl) is the fail-closed verified
-transaction runtime for agent writes.
+## Python API
+
+```python
+from pathlib import Path
+
+from spreadsheet_guard import guard_workbooks
+
+outcome = guard_workbooks(
+    Path("before.xlsx"),
+    Path("after.xlsx"),
+    Path("preservation-report.json"),
+)
+print(outcome.status)
+```
 
 ## Limits
 
-- This tool is read-only. It reports damage and does not repair or write either
+- The Guard evaluates preservation. It does not determine whether formulas,
+  assumptions, or business logic are correct.
+- The Guard is read-only. It reports findings and does not repair either
   workbook.
-- The evidence uses synthetic fixtures and the Enron corpus. Enron workbooks are
-  from 2001 and are not a proxy for modern bank templates.
-- The primary baseline is openpyxl. An Excel-COM write-path comparison runs only
-  when desktop Excel is available.
+- Inputs are limited to OOXML `.xlsx` and `.xlsm` workbooks.
+- A clean report applies only to the configured dimensions and the supplied
+  before-and-after pair.
+
+## Write with a commit gate
+
+[`WolfXL`](https://github.com/wolfiesch/wolfxl) applies policy before a workbook
+write, runs independent verification, and commits only accepted candidates.
+`spreadsheet-guard` is the free, read-only audit surface.
 
 ## License
 
