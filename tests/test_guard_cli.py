@@ -2,16 +2,25 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import ModuleType
 from typing import Any
 
 import pytest
 
 import spreadsheet_guard.cli as cli_module
 import spreadsheet_guard.guard as guard_module
-from spreadsheet_guard.guard import GuardExecutionError, GuardOutcome, guard_workbooks
+from spreadsheet_guard.guard import (
+    GuardExecutionError,
+    GuardOutcome,
+    GuardUnavailableError,
+    guard_workbooks,
+)
 
 
-def test_guard_workbooks_delegates_read_only_comparison(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_guard_workbooks_delegates_to_versioned_contract(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     before = tmp_path / "before.xlsx"
     after = tmp_path / "after.xlsx"
     output = tmp_path / "guard.json"
@@ -19,40 +28,83 @@ def test_guard_workbooks_delegates_read_only_comparison(tmp_path: Path, monkeypa
     after.write_bytes(b"after")
     received: dict[str, Any] = {}
 
-    def fake_guard(**kwargs: Any) -> dict[str, Any]:
+    def fake_guard(**kwargs: Any) -> dict[str, object]:
         received.update(kwargs)
         report = {"schema_version": 1, "status": "passed"}
         kwargs["output"].write_text(json.dumps(report))
-        return report
+        return {
+            "contract_version": "wolfxl-guard-contract-v1",
+            "status": "passed",
+            "output_path": str(kwargs["output"].resolve()),
+            "report": report,
+        }
 
     monkeypatch.setattr(guard_module, "_load_wolfxl_guard", lambda: fake_guard)
 
     outcome = guard_workbooks(before, after, output)
 
     assert outcome.status == "passed"
-    assert outcome.output_path == output
-    assert received == {"before": before, "after": after, "output": output}
+    assert outcome.output_path == output.resolve()
+    assert received == {
+        "before": before,
+        "after": after,
+        "output": output,
+        "policy": None,
+    }
     assert before.read_bytes() == b"before"
     assert after.read_bytes() == b"after"
 
 
-def test_guard_workbooks_fails_closed_on_invalid_report(
+@pytest.mark.parametrize(
+    ("version", "has_runner"),
+    [
+        (None, True),
+        ("wolfxl-guard-contract-v0", True),
+        ("wolfxl-guard-contract-v1", False),
+    ],
+)
+def test_loader_fails_closed_on_contract_drift(
+    version: object,
+    has_runner: bool,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = ModuleType("wolfxl.guard_contract")
+    if version is not None:
+        module.GUARD_CONTRACT_VERSION = version
+    if has_runner:
+        module.run_guard_contract = lambda **kwargs: kwargs
+    monkeypatch.setattr(guard_module, "import_module", lambda name: module)
+
+    with pytest.raises(GuardUnavailableError):
+        guard_module._load_wolfxl_guard()
+
+
+def test_guard_workbooks_fails_closed_on_invalid_contract_result(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     output = tmp_path / "guard.json"
+    output.write_text("{}")
 
-    def fake_guard(**kwargs: Any) -> dict[str, Any]:
-        kwargs["output"].write_text("{}")
-        return {"status": "unknown"}
-
-    monkeypatch.setattr(guard_module, "_load_wolfxl_guard", lambda: fake_guard)
+    monkeypatch.setattr(
+        guard_module,
+        "_load_wolfxl_guard",
+        lambda: lambda **kwargs: {
+            "contract_version": "wolfxl-guard-contract-v1",
+            "status": "unknown",
+            "output_path": str(output),
+            "report": {},
+        },
+    )
 
     with pytest.raises(GuardExecutionError, match="invalid status"):
         guard_workbooks(tmp_path / "before.xlsx", tmp_path / "after.xlsx", output)
 
 
-@pytest.mark.parametrize(("status", "expected_code"), [("passed", 0), ("failed", 1), ("unassessed", 1)])
+@pytest.mark.parametrize(
+    ("status", "expected_code"),
+    [("passed", 0), ("failed", 1), ("unassessed", 1)],
+)
 def test_guard_cli_exit_code_tracks_guard_status(
     status: str,
     expected_code: int,
@@ -78,7 +130,12 @@ def test_guard_cli_exit_code_tracks_guard_status(
     monkeypatch.setattr(cli_module, "guard_workbooks", fake_guard_workbooks)
 
     code = cli_module.main(
-        [str(tmp_path / "before.xlsx"), str(tmp_path / "after.xlsx"), "--output", str(output)]
+        [
+            str(tmp_path / "before.xlsx"),
+            str(tmp_path / "after.xlsx"),
+            "--output",
+            str(output),
+        ]
     )
 
     assert code == expected_code
