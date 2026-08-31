@@ -8,7 +8,6 @@ from importlib import import_module
 from pathlib import Path
 from typing import Any, cast
 
-
 EXPECTED_GUARD_CONTRACT_VERSION = "wolfxl-guard-contract-v1"
 
 

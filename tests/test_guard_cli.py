@@ -6,7 +6,6 @@ from types import ModuleType
 from typing import Any
 
 import pytest
-
 import spreadsheet_guard.cli as cli_module
 import spreadsheet_guard.guard as guard_module
 from spreadsheet_guard.guard import (
@@ -125,7 +124,11 @@ def test_guard_cli_exit_code_tracks_guard_status(
         assert after == tmp_path / "after.xlsx"
         assert requested_output == output
         assert policy is None
-        return GuardOutcome(status=status, output_path=output, report={"status": status})
+        return GuardOutcome(
+            status=status,
+            output_path=output,
+            report={"status": status},
+        )
 
     monkeypatch.setattr(cli_module, "guard_workbooks", fake_guard_workbooks)
 
