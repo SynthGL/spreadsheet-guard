@@ -24,6 +24,11 @@ from xml.etree import ElementTree
 
 AuditValue = TypeVar("AuditValue")
 FingerprintValue = TypeVar("FingerprintValue", bound=Mapping[str, object])
+_WorksheetFormulaCell = tuple[
+    ElementTree.Element,
+    ElementTree.Element | None,
+    tuple[int, int],
+]
 REL_NS = "{http://schemas.openxmlformats.org/package/2006/relationships}"
 CT_NS = "{http://schemas.openxmlformats.org/package/2006/content-types}"
 MAIN_NS = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
@@ -1697,22 +1702,11 @@ def _timeline_fingerprint(
 
 def _worksheet_formula_cells(
     root: ElementTree.Element,
-) -> list[
-    tuple[
-        ElementTree.Element,
-        ElementTree.Element | None,
-        tuple[int, int],
-    ]
-]:
-    cells: list[
-        tuple[
-            ElementTree.Element,
-            ElementTree.Element | None,
-            tuple[int, int],
-        ]
-    ] = []
+) -> Iterable[_WorksheetFormulaCell]:
     previous_row = 0
-    for row in _nodes_by_local(root, "row"):
+    for row in root.iter():
+        if _local_name(row.tag) != "row":
+            continue
         row_reference = _attr(row, "r")
         row_number = (
             int(row_reference)
@@ -1722,7 +1716,9 @@ def _worksheet_formula_cells(
             else previous_row + 1
         )
         previous_column = 0
-        for cell in _children_by_local(row, "c"):
+        for cell in row:
+            if _local_name(cell.tag) != "c":
+                continue
             cell_reference = _attr(cell, "r")
             coordinate = (
                 _cell_coordinate(cell_reference) if cell_reference is not None else None
@@ -1732,25 +1728,16 @@ def _worksheet_formula_cells(
             elif row_reference is None:
                 row_number = coordinate[1]
             previous_column = coordinate[0]
-            cells.append(
-                (
-                    cell,
-                    _first_child_by_local(cell, "f"),
-                    coordinate,
-                )
+            yield (
+                cell,
+                _first_child_by_local(cell, "f"),
+                coordinate,
             )
         previous_row = max(previous_row, row_number)
-    return cells
 
 
 def _range_formula_result_coordinates(
-    cells: list[
-        tuple[
-            ElementTree.Element,
-            ElementTree.Element | None,
-            tuple[int, int],
-        ]
-    ],
+    cells: list[_WorksheetFormulaCell],
     ranges: list[tuple[int, int, int, int]],
 ) -> set[tuple[int, int]]:
     events: dict[int, list[tuple[int, int]]] = {}
@@ -1837,15 +1824,24 @@ def _worksheet_formula_fingerprint(
         root = _read_xml_or_none(archive, part)
         if root is None:
             continue
-        cells = _worksheet_formula_cells(root)
         range_formula_ranges = [
             bounds
-            for _, formula, _ in cells
-            if formula is not None
+            for formula in root.iter()
+            if _local_name(formula.tag) == "f"
             and _attr(formula, "t") in {"array", "dataTable"}
             and (bounds := _cell_range_bounds(_attr(formula, "ref"))) is not None
         ]
-        range_results = _range_formula_result_coordinates(cells, range_formula_ranges)
+        cells: Iterable[_WorksheetFormulaCell]
+        range_results: set[tuple[int, int]] = set()
+        if range_formula_ranges:
+            materialized_cells = list(_worksheet_formula_cells(root))
+            range_results = _range_formula_result_coordinates(
+                materialized_cells,
+                range_formula_ranges,
+            )
+            cells = materialized_cells
+        else:
+            cells = _worksheet_formula_cells(root)
 
         formulas: list[object] = []
         for cell, formula, coordinate in cells:
