@@ -6,6 +6,7 @@ from types import ModuleType
 from typing import Any
 
 import pytest
+
 import spreadsheet_guard.cli as cli_module
 import spreadsheet_guard.guard as guard_module
 from spreadsheet_guard.guard import (
