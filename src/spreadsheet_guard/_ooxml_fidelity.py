@@ -17,15 +17,23 @@ import time
 import zipfile
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import asdict, dataclass
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, TypedDict, TypeVar, cast
 from xml.etree import ElementTree
 
 AuditValue = TypeVar("AuditValue")
 FingerprintValue = TypeVar("FingerprintValue", bound=Mapping[str, object])
+_WorksheetFormulaCell = tuple[
+    ElementTree.Element,
+    ElementTree.Element | None,
+    tuple[int, int],
+]
 REL_NS = "{http://schemas.openxmlformats.org/package/2006/relationships}"
 CT_NS = "{http://schemas.openxmlformats.org/package/2006/content-types}"
 MAIN_NS = "{http://schemas.openxmlformats.org/spreadsheetml/2006/main}"
+_MAX_WORKSHEET_COLUMN = 16_384
+_MAX_WORKSHEET_ROW = 1_048_576
 
 FEATURE_PART_PREFIXES = {
     "calc_chain": ("xl/calcChain.xml",),
@@ -1085,14 +1093,40 @@ def _range_width(ref: str) -> int | None:
     return abs(last_col - first_col) + 1
 
 
-def _cell_col_index(cell: str) -> int | None:
-    match = re.match(r"^\$?([A-Za-z]+)\$?\d+$", cell)
+def _cell_coordinate(cell: str) -> tuple[int, int] | None:
+    match = re.fullmatch(r"\$?([A-Za-z]+)\$?(\d+)", cell)
     if match is None:
         return None
-    value = 0
+    column = 0
     for char in match.group(1).upper():
-        value = value * 26 + (ord(char) - ord("A") + 1)
-    return value
+        column = column * 26 + (ord(char) - ord("A") + 1)
+    row = int(match.group(2))
+    if not (1 <= column <= _MAX_WORKSHEET_COLUMN and 1 <= row <= _MAX_WORKSHEET_ROW):
+        return None
+    return column, row
+
+
+def _cell_range_bounds(ref: str | None) -> tuple[int, int, int, int] | None:
+    if ref is None:
+        return None
+    first, separator, last = ref.partition(":")
+    first_coordinate = _cell_coordinate(first)
+    last_coordinate = _cell_coordinate(last if separator else first)
+    if first_coordinate is None or last_coordinate is None:
+        return None
+    first_column, first_row = first_coordinate
+    last_column, last_row = last_coordinate
+    return (
+        min(first_column, last_column),
+        min(first_row, last_row),
+        max(first_column, last_column),
+        max(first_row, last_row),
+    )
+
+
+def _cell_col_index(cell: str) -> int | None:
+    coordinate = _cell_coordinate(cell)
+    return coordinate[0] if coordinate is not None else None
 
 
 def _read_semantic_fingerprints(
@@ -1666,6 +1700,120 @@ def _timeline_fingerprint(
     return out
 
 
+def _worksheet_formula_cells(
+    root: ElementTree.Element,
+) -> Iterable[_WorksheetFormulaCell]:
+    previous_row = 0
+    for row in root.iter():
+        if _local_name(row.tag) != "row":
+            continue
+        row_reference = _attr(row, "r")
+        row_number = (
+            int(row_reference)
+            if row_reference is not None
+            and row_reference.isdigit()
+            and 1 <= int(row_reference) <= _MAX_WORKSHEET_ROW
+            else previous_row + 1
+        )
+        previous_column = 0
+        for cell in row:
+            if _local_name(cell.tag) != "c":
+                continue
+            cell_reference = _attr(cell, "r")
+            coordinate = (
+                _cell_coordinate(cell_reference) if cell_reference is not None else None
+            )
+            if coordinate is None:
+                coordinate = previous_column + 1, row_number
+            elif row_reference is None:
+                row_number = coordinate[1]
+            previous_column = coordinate[0]
+            yield (
+                cell,
+                _first_child_by_local(cell, "f"),
+                coordinate,
+            )
+        previous_row = max(previous_row, row_number)
+
+
+def _range_formula_result_coordinates(
+    cells: list[_WorksheetFormulaCell],
+    ranges: list[tuple[int, int, int, int]],
+) -> set[tuple[int, int]]:
+    events: dict[int, list[tuple[int, int]]] = {}
+    for first_column, first_row, last_column, last_row in ranges:
+        events.setdefault(first_row, []).extend(
+            ((first_column, 1), (last_column + 1, -1))
+        )
+        if last_row < _MAX_WORKSHEET_ROW:
+            events.setdefault(last_row + 1, []).extend(
+                ((first_column, -1), (last_column + 1, 1))
+            )
+    if not events:
+        return set()
+
+    event_rows = sorted(events)
+    event_index = 0
+    coverage_tree = [0] * (_MAX_WORKSHEET_COLUMN + 2)
+
+    def update(column: int, delta: int) -> None:
+        while column < len(coverage_tree):
+            coverage_tree[column] += delta
+            column += column & -column
+
+    def coverage(column: int) -> int:
+        value = 0
+        while column > 0:
+            value += coverage_tree[column]
+            column -= column & -column
+        return value
+
+    results: set[tuple[int, int]] = set()
+    for _, formula, coordinate in sorted(
+        cells,
+        key=lambda item: (item[2][1], item[2][0]),
+    ):
+        column, row = coordinate
+        while event_index < len(event_rows) and event_rows[event_index] <= row:
+            for event_column, delta in events[event_rows[event_index]]:
+                update(event_column, delta)
+            event_index += 1
+        if formula is None and coverage(column) > 0:
+            results.add(coordinate)
+    return results
+
+
+def _cached_formula_value_fingerprint(
+    cell: ElementTree.Element,
+) -> tuple[str, bool, object]:
+    effective_type = _attr(cell, "t") or "n"
+    cached_value = _first_child_by_local(cell, "v")
+    if cached_value is None:
+        return effective_type, False, None
+    value = cached_value.text
+    if effective_type != "n" or value is None:
+        return effective_type, True, value
+    try:
+        number = Decimal(value.strip())
+    except InvalidOperation:
+        return effective_type, True, value
+    if not number.is_finite():
+        return effective_type, True, value
+    sign, digits, exponent = number.as_tuple()
+    if not any(digits):
+        return effective_type, True, (0, (0,), 0)
+    canonical_digits = list(digits)
+    canonical_exponent = cast(int, exponent)
+    while canonical_digits[-1] == 0:
+        canonical_digits.pop()
+        canonical_exponent += 1
+    return (
+        effective_type,
+        True,
+        (sign, tuple(canonical_digits), canonical_exponent),
+    )
+
+
 def _worksheet_formula_fingerprint(
     archive: zipfile.ZipFile, parts: set[str]
 ) -> dict[str, list[object]]:
@@ -1676,20 +1824,41 @@ def _worksheet_formula_fingerprint(
         root = _read_xml_or_none(archive, part)
         if root is None:
             continue
-        formulas: list[object] = []
-        for cell in root.iter():
-            if _local_name(cell.tag) != "c":
-                continue
-            formula = _first_child_by_local(cell, "f")
-            if formula is None:
-                continue
-            formulas.append(
-                (
-                    _stable_attrs(cell, ("r",)),
-                    _stable_attrs(formula, ("t", "ref", "si", "ca", "bx")),
-                    _text(formula),
-                )
+        range_formula_ranges = [
+            bounds
+            for formula in root.iter()
+            if _local_name(formula.tag) == "f"
+            and _attr(formula, "t") in {"array", "dataTable"}
+            and (bounds := _cell_range_bounds(_attr(formula, "ref"))) is not None
+        ]
+        cells: Iterable[_WorksheetFormulaCell]
+        range_results: set[tuple[int, int]] = set()
+        if range_formula_ranges:
+            materialized_cells = list(_worksheet_formula_cells(root))
+            range_results = _range_formula_result_coordinates(
+                materialized_cells,
+                range_formula_ranges,
             )
+            cells = materialized_cells
+        else:
+            cells = _worksheet_formula_cells(root)
+
+        formulas: list[object] = []
+        for cell, formula, coordinate in cells:
+            if formula is None and coordinate not in range_results:
+                continue
+            fingerprint: dict[str, object] = {
+                "kind": "formula" if formula is not None else "range_result",
+                "cell": coordinate,
+                "cached_value": _cached_formula_value_fingerprint(cell),
+            }
+            if formula is not None:
+                fingerprint["formula"] = _stable_attrs(
+                    formula,
+                    ("t", "ref", "si", "ca", "bx"),
+                )
+                fingerprint["text"] = _text(formula)
+            formulas.append(fingerprint)
         if formulas:
             out[part] = formulas
     return out
@@ -1742,14 +1911,13 @@ def _structured_reference_fingerprint(
     if formulas_by_part is None:
         formulas_by_part = _worksheet_formula_fingerprint(archive, parts)
     for part, formulas in formulas_by_part.items():
-        structured = [
-            formula
-            for formula in formulas
-            if isinstance(formula, tuple)
-            and len(formula) == 3
-            and isinstance(formula[2], str)
-            and _is_structured_reference_formula(formula[2])
-        ]
+        structured: list[Mapping[str, object]] = []
+        for formula in formulas:
+            if not isinstance(formula, Mapping):
+                continue
+            text = formula.get("text")
+            if isinstance(text, str) and _is_structured_reference_formula(text):
+                structured.append(formula)
         if structured:
             out[part] = structured
     return out
@@ -2046,13 +2214,11 @@ def _worksheet_formula_texts(
     for part, formulas in formulas_by_part.items():
         texts: list[str] = []
         for formula in formulas:
-            if not (
-                isinstance(formula, tuple)
-                and len(formula) == 3
-                and isinstance(formula[2], str)
-            ):
+            if not isinstance(formula, Mapping):
                 continue
-            text = formula[2]
+            text = formula.get("text")
+            if not isinstance(text, str):
+                continue
             if external_only and not _is_external_workbook_formula(text):
                 continue
             texts.append(text)
