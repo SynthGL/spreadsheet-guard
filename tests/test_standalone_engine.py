@@ -95,6 +95,76 @@ def test_bundled_engine_rejects_a_cached_formula_result_change(
     }
 
 
+def test_bundled_engine_rejects_a_non_anchor_array_cached_result_change(
+    tmp_path: Path,
+) -> None:
+    before = tmp_path / "array-before.xlsx"
+    after = tmp_path / "array-after.xlsx"
+    _replace_archive_member(
+        PROOF_DIR / "before.xlsx",
+        before,
+        "xl/worksheets/sheet1.xml",
+        (
+            b'<c r="A3"><f>SUM(A1:A2)</f><v>0</v></c></row>'
+            b'<row r="4" spans="1:1"><c r="A4"><f>A3*2</f><v>0</v></c>'
+        ),
+        (
+            b'<c r="A3"><f t="array" ref="A3:A4">SUM(A1:A2)</f><v>30</v></c>'
+            b'</row><row r="4" spans="1:1"><c r="A4"><v>60</v></c>'
+        ),
+    )
+    _replace_archive_member(
+        before,
+        after,
+        "xl/worksheets/sheet1.xml",
+        b'<c r="A4"><v>60</v></c>',
+        b'<c r="A4"><v>999</v></c>',
+    )
+
+    outcome = guard_workbooks(
+        before,
+        after,
+        tmp_path / "array-cached-result-report.json",
+    )
+
+    assert outcome.status == "failed"
+    package_decision = outcome.report["policy_decisions"]["package_integrity"]
+    assert package_decision["status"] == "failed"
+    assert {finding["kind"] for finding in package_decision["findings"]} == {
+        "worksheet_formulas_semantic_drift"
+    }
+
+
+def test_bundled_engine_preserves_cached_string_whitespace(tmp_path: Path) -> None:
+    before = tmp_path / "string-before.xlsx"
+    after = tmp_path / "string-after.xlsx"
+    original = b'<c r="A3"><f>SUM(A1:A2)</f><v>0</v></c>'
+    for destination, cached_value in (
+        (before, b" hello "),
+        (after, b"hello"),
+    ):
+        _replace_archive_member(
+            PROOF_DIR / "before.xlsx",
+            destination,
+            "xl/worksheets/sheet1.xml",
+            original,
+            (b'<c r="A3" t="str"><f>SUM(A1:A2)</f><v>' + cached_value + b"</v></c>"),
+        )
+
+    outcome = guard_workbooks(
+        before,
+        after,
+        tmp_path / "string-cached-result-report.json",
+    )
+
+    assert outcome.status == "failed"
+    package_decision = outcome.report["policy_decisions"]["package_integrity"]
+    assert package_decision["status"] == "failed"
+    assert {finding["kind"] for finding in package_decision["findings"]} == {
+        "worksheet_formulas_semantic_drift"
+    }
+
+
 @pytest.mark.parametrize(
     ("formula_text", "fingerprint_name"),
     [

@@ -1085,14 +1085,47 @@ def _range_width(ref: str) -> int | None:
     return abs(last_col - first_col) + 1
 
 
-def _cell_col_index(cell: str) -> int | None:
-    match = re.match(r"^\$?([A-Za-z]+)\$?\d+$", cell)
+def _cell_coordinate(cell: str) -> tuple[int, int] | None:
+    match = re.fullmatch(r"\$?([A-Za-z]+)\$?(\d+)", cell)
     if match is None:
         return None
-    value = 0
+    column = 0
     for char in match.group(1).upper():
-        value = value * 26 + (ord(char) - ord("A") + 1)
-    return value
+        column = column * 26 + (ord(char) - ord("A") + 1)
+    row = int(match.group(2))
+    return (column, row) if row > 0 else None
+
+
+def _cell_range_bounds(ref: str | None) -> tuple[int, int, int, int] | None:
+    if ref is None:
+        return None
+    first, separator, last = ref.partition(":")
+    first_coordinate = _cell_coordinate(first)
+    last_coordinate = _cell_coordinate(last if separator else first)
+    if first_coordinate is None or last_coordinate is None:
+        return None
+    first_column, first_row = first_coordinate
+    last_column, last_row = last_coordinate
+    return (
+        min(first_column, last_column),
+        min(first_row, last_row),
+        max(first_column, last_column),
+        max(first_row, last_row),
+    )
+
+
+def _coordinate_in_range(
+    coordinate: tuple[int, int],
+    bounds: tuple[int, int, int, int],
+) -> bool:
+    column, row = coordinate
+    first_column, first_row, last_column, last_row = bounds
+    return first_column <= column <= last_column and first_row <= row <= last_row
+
+
+def _cell_col_index(cell: str) -> int | None:
+    coordinate = _cell_coordinate(cell)
+    return coordinate[0] if coordinate is not None else None
 
 
 def _read_semantic_fingerprints(
@@ -1676,23 +1709,47 @@ def _worksheet_formula_fingerprint(
         root = _read_xml_or_none(archive, part)
         if root is None:
             continue
-        formulas: list[object] = []
+        cells: list[tuple[ElementTree.Element, ElementTree.Element | None]] = []
+        array_ranges: list[tuple[int, int, int, int]] = []
         for cell in root.iter():
             if _local_name(cell.tag) != "c":
                 continue
             formula = _first_child_by_local(cell, "f")
+            cells.append((cell, formula))
+            if formula is not None and _attr(formula, "t") == "array":
+                bounds = _cell_range_bounds(_attr(formula, "ref"))
+                if bounds is not None:
+                    array_ranges.append(bounds)
+
+        formulas: list[object] = []
+        for cell, formula in cells:
             if formula is None:
-                continue
-            cached_value = _first_child_by_local(cell, "v")
-            formulas.append(
-                (
-                    _stable_attrs(cell, ("r", "t")),
-                    _stable_attrs(formula, ("t", "ref", "si", "ca", "bx")),
-                    _text(formula),
-                    cached_value is not None,
-                    _text(cached_value) if cached_value is not None else None,
+                cell_reference = _attr(cell, "r")
+                coordinate = (
+                    _cell_coordinate(cell_reference)
+                    if cell_reference is not None
+                    else None
                 )
-            )
+                if coordinate is None or not any(
+                    _coordinate_in_range(coordinate, bounds) for bounds in array_ranges
+                ):
+                    continue
+            cached_value = _first_child_by_local(cell, "v")
+            fingerprint: dict[str, object] = {
+                "kind": "formula" if formula is not None else "array_result",
+                "cell": _stable_attrs(cell, ("r", "t")),
+                "cached_value": (
+                    cached_value is not None,
+                    cached_value.text if cached_value is not None else None,
+                ),
+            }
+            if formula is not None:
+                fingerprint["formula"] = _stable_attrs(
+                    formula,
+                    ("t", "ref", "si", "ca", "bx"),
+                )
+                fingerprint["text"] = _text(formula)
+            formulas.append(fingerprint)
         if formulas:
             out[part] = formulas
     return out
@@ -1745,14 +1802,13 @@ def _structured_reference_fingerprint(
     if formulas_by_part is None:
         formulas_by_part = _worksheet_formula_fingerprint(archive, parts)
     for part, formulas in formulas_by_part.items():
-        structured = [
-            formula
-            for formula in formulas
-            if isinstance(formula, tuple)
-            and len(formula) >= 3
-            and isinstance(formula[2], str)
-            and _is_structured_reference_formula(formula[2])
-        ]
+        structured: list[Mapping[str, object]] = []
+        for formula in formulas:
+            if not isinstance(formula, Mapping):
+                continue
+            text = formula.get("text")
+            if isinstance(text, str) and _is_structured_reference_formula(text):
+                structured.append(formula)
         if structured:
             out[part] = structured
     return out
@@ -2049,13 +2105,11 @@ def _worksheet_formula_texts(
     for part, formulas in formulas_by_part.items():
         texts: list[str] = []
         for formula in formulas:
-            if not (
-                isinstance(formula, tuple)
-                and len(formula) >= 3
-                and isinstance(formula[2], str)
-            ):
+            if not isinstance(formula, Mapping):
                 continue
-            text = formula[2]
+            text = formula.get("text")
+            if not isinstance(text, str):
+                continue
             if external_only and not _is_external_workbook_formula(text):
                 continue
             texts.append(text)
