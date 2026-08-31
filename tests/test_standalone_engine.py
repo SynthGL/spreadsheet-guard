@@ -110,15 +110,15 @@ def test_bundled_engine_rejects_a_non_anchor_array_cached_result_change(
         ),
         (
             b'<c r="A3"><f t="array" ref="A3:A4">SUM(A1:A2)</f><v>30</v></c>'
-            b'</row><row r="4" spans="1:1"><c r="A4"><v>60</v></c>'
+            b'</row><row r="4" spans="1:1"><c><v>60</v></c>'
         ),
     )
     _replace_archive_member(
         before,
         after,
         "xl/worksheets/sheet1.xml",
-        b'<c r="A4"><v>60</v></c>',
-        b'<c r="A4"><v>999</v></c>',
+        b"<c><v>60</v></c>",
+        b"<c><v>999</v></c>",
     )
 
     outcome = guard_workbooks(
@@ -133,6 +133,39 @@ def test_bundled_engine_rejects_a_non_anchor_array_cached_result_change(
     assert {finding["kind"] for finding in package_decision["findings"]} == {
         "worksheet_formulas_semantic_drift"
     }
+
+
+def test_bundled_engine_normalizes_equivalent_numeric_formula_caches(
+    tmp_path: Path,
+) -> None:
+    before = tmp_path / "numeric-before.xlsx"
+    after = tmp_path / "numeric-after.xlsx"
+    original = b'<c r="A3"><f>SUM(A1:A2)</f><v>0</v></c>'
+    for destination, formula_cell in (
+        (
+            before,
+            b'<c r="A3" t="n"><f>SUM(A1:A2)</f><v>1.0</v></c>',
+        ),
+        (
+            after,
+            b'<c r="A3"><f>SUM(A1:A2)</f><v>1</v></c>',
+        ),
+    ):
+        _replace_archive_member(
+            PROOF_DIR / "before.xlsx",
+            destination,
+            "xl/worksheets/sheet1.xml",
+            original,
+            formula_cell,
+        )
+
+    outcome = guard_workbooks(
+        before,
+        after,
+        tmp_path / "numeric-cached-result-report.json",
+    )
+
+    assert outcome.status == "passed"
 
 
 def test_bundled_engine_preserves_cached_string_whitespace(tmp_path: Path) -> None:
